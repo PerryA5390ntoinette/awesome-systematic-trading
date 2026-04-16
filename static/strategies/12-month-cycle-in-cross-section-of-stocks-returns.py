@@ -11,6 +11,8 @@
 # Personal notes:
 #   - Increased coarse_count from 500 to 1000 for a broader universe sample.
 #   - The original paper uses top 30% by market cap; using dollar volume as proxy here.
+#   - Increased history lookback multiplier from 30 to 35 days per month to better handle
+#     months with holidays/fewer trading days and reduce missing data warnings.
 
 from AlgorithmImports import *
 
@@ -65,15 +67,11 @@ class Month12CycleinCrossSectionofStocksReturns(QCAlgorithm):
                 continue
             
             self.data[symbol] = SymbolData(symbol, self.period)
-            history = self.History(symbol, self.period*30, Resolution.Daily)
+            # Increased multiplier from 30 to 35 to better handle months with fewer trading days
+            history = self.History(symbol, self.period*35, Resolution.Daily)
             if history.empty:
                 self.Log(f"Not enough data for {symbol} yet.")
                 continue
             closes = history.loc[symbol].close
             
-            closes_len = len(closes.keys())
-            # Find monthly closes.
-            for index, time_close in enumerate(closes.iteritems()):
-                # index out of bounds check.
-                if index + 1 < closes_len:
-                   
+   
