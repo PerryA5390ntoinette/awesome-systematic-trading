@@ -1,114 +1,132 @@
-#region imports
+# Asset Growth Effect Strategy
+# Based on: Cooper, Gulen, and Schill (2008)
+# "Asset Growth and the Cross-Section of Stock Returns"
+#
+# Strategy Logic:
+# - Firms with low asset growth rates earn higher future returns than firms with high asset growth rates
+# - Go long on stocks with lowest total asset growth (bottom decile)
+# - Go short on stocks with highest total asset growth (top decile)
+# - Rebalance annually
+
 from AlgorithmImports import *
-#endregion
-# https://quantpedia.com/strategies/asset-growth-effect/
-#
-# The investment universe consists of all non-financial U.S. stocks listed on NYSE, AMEX, and NASDAQ. Stocks are then sorted each year at the end 
-# of June into ten equal groups based on the percentage change in total assets for the previous year. The investor goes long decile with low asset
-# growth firms and short decile with high asset growth firms. The portfolio is weighted equally and rebalanced every year.
-#
-# QC implementation changes:
-#   - Top 3000 stocks by market cap are selected from QC stock universe.
+from datetime import timedelta
+
 
 class AssetGrowthEffect(QCAlgorithm):
 
     def Initialize(self):
         self.SetStartDate(2000, 1, 1)
-        self.SetCash(100000)
-        
-        self.symbol:Symbol = self.AddEquity("SPY", Resolution.Daily).Symbol
+        self.SetEndDate(2020, 12, 31)
+        self.SetCash(1_000_000)
 
-        self.long:list[Symbol] = []
-        self.short:list[Symbol] = []
-        
-        self.coarse_count:int = 3000
-        self.quantile:int = 10
-        
-        # Latest assets data.
-        self.total_assets:dict[Symbol, float] = {}
-        
-        self.selection_flag:bool = False
-        self.UniverseSettings.Resolution = Resolution.Daily
-        self.AddUniverse(self.CoarseSelectionFunction, self.FineSelectionFunction)
-        self.Schedule.On(self.DateRules.MonthEnd(self.symbol), self.TimeRules.AfterMarketOpen(self.symbol), self.Selection)
+        self.SetSecurityInitializer(
+            lambda x: x.SetFeeModel(ConstantFeeModel(0))
+        )
+
+        self.coarse_count = 1000
+        self.long_count = 50
+        self.short_count = 50
+        self.rebalance_months = 12
+        self.last_rebalance = datetime.min
+
+        self.long_symbols = []
+        self.short_symbols = []
+        self.filtered_fine = None
+
+        self.AddUniverse(
+            self.CoarseSelectionFunction,
+            self.FineSelectionFunction
+        )
+
+        self.Schedule.On(
+            self.DateRules.MonthStart(),
+            self.TimeRules.AfterMarketOpen("SPY", 30),
+            self.Rebalance
+        )
+
+        self.AddEquity("SPY", Resolution.Daily)
+
+    def CoarseSelectionFunction(self, coarse):
+        # Filter by price and volume, require fundamental data
+        filtered = [
+            x for x in coarse
+            if x.HasFundamentalData
+            and x.Price > 5
+            and x.DollarVolume > 1_000_000
+        ]
+
+        # Sort by dollar volume and take top N
+        sorted_by_volume = sorted(
+            filtered,
+            key=lambda x: x.DollarVolume,
+            reverse=True
+        )
+
+        return [x.Symbol for x in sorted_by_volume[:self.coarse_count]]
+
+    def FineSelectionFunction(self, fine):
+        # Filter to those with valid total assets data for two consecutive years
+        valid = [
+            x for x in fine
+            if x.FinancialStatements.BalanceSheet.TotalAssets.TwelveMonths > 0
+            and x.FinancialStatements.BalanceSheet.TotalAssets.OneYear > 0
+        ]
+
+        # Calculate asset growth rate: (Total Assets[t] - Total Assets[t-1]) / Total Assets[t-1]
+        for stock in valid:
+            current_assets = stock.FinancialStatements.BalanceSheet.TotalAssets.TwelveMonths
+            prior_assets = stock.FinancialStatements.BalanceSheet.TotalAssets.OneYear
+            stock.AssetGrowth = (current_assets - prior_assets) / prior_assets
+
+        # Sort by asset growth rate
+        sorted_by_growth = sorted(valid, key=lambda x: x.AssetGrowth)
+
+        # Bottom decile (lowest growth) -> long
+        self.long_symbols = [
+            x.Symbol for x in sorted_by_growth[:self.long_count]
+        ]
+        # Top decile (highest growth) -> short
+        self.short_symbols = [
+            x.Symbol for x in sorted_by_growth[-self.short_count:]
+        ]
+
+        return self.long_symbols + self.short_symbols
 
     def OnSecuritiesChanged(self, changes):
-        for security in changes.AddedSecurities:
-            security.SetFeeModel(CustomFeeModel())
-            security.SetLeverage(5)
-            
-    def CoarseSelectionFunction(self, coarse):
-        if not self.selection_flag:
-            return Universe.Unchanged
-        
-        # Select all stocks in universe.
-        return [x.Symbol for x in coarse if x.HasFundamentalData and x.Market == 'usa']
-    
-    def FineSelectionFunction(self, fine):
-        fine = [x for x in fine if x.FinancialStatements.BalanceSheet.TotalAssets.TwelveMonths > 0 and
-                ((x.SecurityReference.ExchangeId == "NYS") or (x.SecurityReference.ExchangeId == "NAS") or (x.SecurityReference.ExchangeId == "ASE"))]
-                
-        if len(fine) > self.coarse_count:
-            sorted_by_market_cap = sorted(fine, key = lambda x: x.MarketCap, reverse=True)
-            fine = sorted_by_market_cap[:self.coarse_count]
-            
-        assets_growth:dict[Symbol, float] = {}
-        for stock in fine:
-            symbol = stock.Symbol
-            
-            if symbol not in self.total_assets:
-                self.total_assets[symbol] = None
-                
-            current_assets = stock.FinancialStatements.BalanceSheet.TotalAssets.TwelveMonths
-            
-            # There is not previous assets data.
-            if not self.total_assets[symbol]:
-                self.total_assets[symbol] = current_assets
-                continue
-            
-            # Assets growth calc.
-            assets_growth[symbol] = (current_assets - self.total_assets[symbol]) / self.total_assets[symbol]
-            
-            # Update data.
-            self.total_assets[symbol] = current_assets
-        
-        # Asset growth sorting.
-        if len(assets_growth) >= self.quantile:
-            sorted_by_assets_growth = sorted(assets_growth.items(), key = lambda x: x[1], reverse = True)
-            decile = int(len(sorted_by_assets_growth) / self.quantile)
-            self.long = [x[0] for x in sorted_by_assets_growth[-decile:]]
-            self.short = [x[0] for x in sorted_by_assets_growth[:decile]]
-        
-        return self.long + self.short
-        
-    def OnData(self, data):
-        if not self.selection_flag:
+        # Liquidate removed securities
+        for security in changes.RemovedSecurities:
+            if security.Invested:
+                self.Liquidate(security.Symbol)
+
+    def Rebalance(self):
+        # Only rebalance once per year
+        if (self.Time - self.last_rebalance).days < 30 * self.rebalance_months:
             return
-        self.selection_flag = False
-        
-        # Trade execution.
-        stocks_invested = [x.Key for x in self.Portfolio if x.Value.Invested]
-        for symbol in stocks_invested:
-            if symbol not in self.long:
+
+        if not self.long_symbols or not self.short_symbols:
+            return
+
+        self.last_rebalance = self.Time
+
+        # Liquidate positions not in current universe
+        current_targets = set(self.long_symbols + self.short_symbols)
+        for symbol, holding in self.Portfolio.items():
+            if holding.Invested and symbol not in current_targets:
                 self.Liquidate(symbol)
 
-        for symbol in self.long:
-            if symbol in data and data[symbol]:
-                self.SetHoldings(symbol, 1 / len(self.long))
+        # Equal weight allocation
+        long_weight = 0.5 / len(self.long_symbols)
+        short_weight = -0.5 / len(self.short_symbols)
 
-        for symbol in self.short:
-            if symbol in data and data[symbol]:
-                self.SetHoldings(symbol, -1 / len(self.short))
+        # Enter long positions (low asset growth)
+        for symbol in self.long_symbols:
+            self.SetHoldings(symbol, long_weight)
 
-        self.long.clear()
-        self.short.clear()
-            
-    def Selection(self):
-        if self.Time.month == 6:
-            self.selection_flag = True
-            
-# Custom fee model.
-class CustomFeeModel(FeeModel):
-    def GetOrderFee(self, parameters):
-        fee = parameters.Security.Price * parameters.Order.AbsoluteQuantity * 0.00005
-        return OrderFee(CashAmount(fee, "USD"))
+        # Enter short positions (high asset growth)
+        for symbol in self.short_symbols:
+            self.SetHoldings(symbol, short_weight)
+
+        self.Log(
+            f"Rebalanced: {len(self.long_symbols)} long, "
+            f"{len(self.short_symbols)} short at {self.Time}"
+        )
