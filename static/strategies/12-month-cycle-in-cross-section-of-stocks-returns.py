@@ -7,6 +7,10 @@
 # QC implementation changes:
 #   - Universe consists of top 3000 US stock by market cap from NYSE, AMEX and NASDAQ.
 #   - Portfolio is value weighted.
+#
+# Personal notes:
+#   - Increased coarse_count from 500 to 1000 for a broader universe sample.
+#   - The original paper uses top 30% by market cap; using dollar volume as proxy here.
 
 from AlgorithmImports import *
 
@@ -18,7 +22,8 @@ class Month12CycleinCrossSectionofStocksReturns(QCAlgorithm):
 
         self.symbol = self.AddEquity('SPY', Resolution.Daily).Symbol
         
-        self.coarse_count = 500
+        # Increased from 500 to 1000 to capture a wider universe
+        self.coarse_count = 1000
         
         # Monthly close data.
         self.data = {}
@@ -71,83 +76,4 @@ class Month12CycleinCrossSectionofStocksReturns(QCAlgorithm):
             for index, time_close in enumerate(closes.iteritems()):
                 # index out of bounds check.
                 if index + 1 < closes_len:
-                    date_month = time_close[0].date().month
-                    next_date_month = closes.keys()[index + 1].month
-                
-                    # Found last day of month.
-                    if date_month != next_date_month:
-                        self.data[symbol].update(time_close[1])
-            
-        return [x for x in selected if self.data[x].is_ready()]    
-        
-    def FineSelectionFunction(self, fine):
-        fine = [x for x in fine if x.MarketCap != 0 and x.CompanyReference.IsREIT != 1 and  \
-                    ((x.SecurityReference.ExchangeId == "NYS") or (x.SecurityReference.ExchangeId == "NAS") or (x.SecurityReference.ExchangeId == "ASE"))]
-                    
-        if len(fine) > self.coarse_count:
-            sorted_by_market_cap = sorted(fine, key = lambda x: x.MarketCap, reverse=True)
-            top_by_market_cap = sorted_by_market_cap[:self.coarse_count]
-        else:
-            top_by_market_cap = fine
-
-        # Performance sorting. One month performance, one year ago with market cap data.
-        performance_market_cap = { x.Symbol : (self.data[x.Symbol].performance(), x.MarketCap) for x in top_by_market_cap if x.Symbol in self.data and self.data[x.Symbol].is_ready()}
-        
-        long = []
-        short = []
-        if len(performance_market_cap) >= 10:
-            sorted_by_perf = sorted(performance_market_cap.items(), key = lambda x:x[1][0], reverse = True)
-            decile = int(len(sorted_by_perf) / 10)
-            long = [x for x in sorted_by_perf[:decile]]
-            short = [x for x in sorted_by_perf[-decile:]]
-        
-        total_market_cap_long = sum([x[1][1] for x in long])
-        for symbol, perf_market_cap in long:
-            self.weight[symbol] = perf_market_cap[1] / total_market_cap_long
-
-        total_market_cap_short = sum([x[1][1] for x in short])
-        for symbol, perf_market_cap in short:
-            self.weight[symbol] = perf_market_cap[1] / total_market_cap_short
-        
-        return [x[0] for x in self.weight.items()]
-
-    def OnData(self, data):
-        if not self.selection_flag:
-            return
-        self.selection_flag = False
-        
-        # Trade execution.
-        stocks_invested = [x.Key for x in self.Portfolio if x.Value.Invested]
-        for symbol in stocks_invested:
-            if symbol not in self.weight:
-                self.Liquidate(symbol)
-        
-        for symbol, w in self.weight.items():
-            self.SetHoldings(symbol, w)
-
-        self.weight.clear()
-    
-    def Selection(self):
-        self.selection_flag = True
-
-class SymbolData():
-    def __init__(self, symbol, period):
-        self.Symbol = symbol
-        self.Window = RollingWindow[float](period)
-    
-    def update(self, value):
-        self.Window.Add(value)
-    
-    def is_ready(self):
-        return self.Window.IsReady
-        
-    # One month performance, one year ago.
-    def performance(self):
-        values = [x for x in self.Window]
-        return (values[-2] / values[-1] - 1)
-        
-# Custom fee model.
-class CustomFeeModel(FeeModel):
-    def GetOrderFee(self, parameters):
-        fee = parameters.Security.Price * parameters.Order.AbsoluteQuantity * 0.00005
-        return OrderFee(CashAmount(fee, "USD"))
+                   
